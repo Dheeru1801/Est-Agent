@@ -10,11 +10,14 @@ dependencies = [
     "python-dotenv>=1,<2",
     "langchain>=0.3,<2",
     "langchain-google-genai>=4.0,<5",
+    "google-genai>=2,<3",
     "langchain-community>=0.3,<1",
     "langchain-text-splitters>=0.3,<2",
-    "langchain-pinecone>=0.2,<1",
+    "pinecone>=10.1,<11",
     "langgraph>=0.2,<2",
-    "pypdf>=5,<7",
+    "docling>=2,<3",
+    "pymupdf>=1.28,<2",
+    "pymupdf4llm>=0.0.17,<2",
 ]
 
 [tool.uv]
