@@ -95,7 +95,8 @@ def build_agent():
     model_name = os.getenv("CHAT_MODEL", "gemini-3.1-flash-lite")
     instructions = (
         "You are a helpful assistant with access to a document knowledge base "
-        "and calculator. "
+        "and calculator. Give the user a clear answer, but do not reveal private "
+        "internal reasoning. Brief activity updates are sent separately by the app. "
         + " ".join(SKILLS.values())
     )
     llm = ChatGoogleGenerativeAI(
@@ -103,6 +104,7 @@ def build_agent():
         google_api_key=os.environ["GOOGLE_API_KEY"],
         temperature=0,
         max_output_tokens=512,
+        streaming=True,
     ).bind_tools(TOOLS)
 
     def assistant(state: AgentState) -> dict[str, list[BaseMessage]]:

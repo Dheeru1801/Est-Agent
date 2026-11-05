@@ -12,6 +12,7 @@ import pymupdf4llm
 from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import HeadingHierarchyOptions, PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
+from docx import Document as WordDocument
 from google import genai
 from google.genai import types
 from langchain_community.document_loaders import TextLoader
@@ -26,8 +27,8 @@ MARKDOWN_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
 PLAIN_HEADING = re.compile(r"^[A-Z0-9][\w &'()/,:-]{0,99}$")
 MIN_PDF_TEXT_CHARS_PER_PAGE = 80
 TEXT_FILE_SUFFIXES = frozenset({".txt", ".md", ".csv", ".json"})
-SUPPORTED_FILE_SUFFIXES = frozenset({".pdf"}) | TEXT_FILE_SUFFIXES
-SUPPORTED_FILE_TYPES = "PDF, TXT, Markdown, CSV, and JSON"
+SUPPORTED_FILE_SUFFIXES = frozenset({".pdf", ".docx"}) | TEXT_FILE_SUFFIXES
+SUPPORTED_FILE_TYPES = "PDF, DOCX, TXT, Markdown, CSV, JSON, or ZIP archives of supported files"
 logger = logging.getLogger(__name__)
 
 
@@ -262,6 +263,30 @@ def _load_pdf(path: str) -> tuple[list[Document], str]:
     return docling_docs, "docling"
 
 
+def _load_docx(path: str) -> list[Document]:
+    """Extract paragraphs and tables from a Word document as Markdown text."""
+    word_document = WordDocument(path)
+    content: list[str] = []
+    for paragraph in word_document.paragraphs:
+        text = paragraph.text.strip()
+        if not text:
+            continue
+        heading = re.match(r"Heading\s+(\d+)", paragraph.style.name, re.IGNORECASE)
+        if heading:
+            level = max(1, min(int(heading.group(1)), 6))
+            content.append(f"{'#' * level} {text}")
+        else:
+            content.append(text)
+    for table in word_document.tables:
+        for row in table.rows:
+            values = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+            content.append(" | ".join(values))
+    text = "\n\n".join(content).strip()
+    if not text:
+        raise ValueError("No readable text was found in this DOCX file.")
+    return [Document(page_content=text, metadata={"parser": "python-docx"})]
+
+
 def _describe_pdf_images(path: str) -> list[Document]:
     """Create Gemini captions for selected embedded PDF figures.
 
@@ -405,12 +430,17 @@ def _record_fields(metadata: dict) -> dict:
     return fields
 
 
-def ingest_file(path: str, filename: str) -> tuple[int, str, int]:
+def ingest_file(
+    path: str,
+    filename: str,
+    document_id: str | None = None,
+) -> tuple[int, str, int]:
     """Parse, chunk, embed, and index one supported source file.
 
     Args:
         path: Temporary or persistent filesystem path to the uploaded file.
         filename: Original filename, stored as the chunk source metadata.
+        document_id: Stable upload ID used to avoid vector ID collisions.
 
     Returns:
         A tuple of indexed chunk count, selected parser name, and generated
@@ -429,6 +459,9 @@ def ingest_file(path: str, filename: str) -> tuple[int, str, int]:
         docs.extend(image_docs)
         for doc in docs:
             doc.metadata.setdefault("parser", parser)
+    elif suffix == ".docx":
+        docs = _load_docx(path)
+        parser = "python-docx"
     elif suffix in TEXT_FILE_SUFFIXES:
         docs = TextLoader(path, encoding="utf-8", autodetect_encoding=True).load()
         parser = "textloader"
@@ -446,7 +479,7 @@ def ingest_file(path: str, filename: str) -> tuple[int, str, int]:
         for index, chunk in enumerate(chunks):
             content = chunk.page_content
             record_id = hashlib.sha256(
-                f"{filename}\0{index}\0{content}".encode("utf-8")
+                f"{document_id or filename}\0{index}\0{content}".encode("utf-8")
             ).hexdigest()
             records.append({
                 "_id": record_id,

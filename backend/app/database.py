@@ -45,34 +45,89 @@ def _utc_now() -> str:
 
 
 def initialize_database() -> None:
-    """Create the document registry table if it does not already exist."""
+    """Create or migrate the document registry schema."""
     with _connection() as connection:
         connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                filename TEXT NOT NULL,
-                stored_path TEXT NOT NULL,
-                content_type TEXT,
-                size_bytes INTEGER NOT NULL,
-                sha256 TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (
-                    status IN ('uploading', 'indexing', 'indexed', 'failed')
-                ),
-                parser TEXT,
-                chunk_count INTEGER NOT NULL DEFAULT 0,
-                image_description_count INTEGER NOT NULL DEFAULT 0,
-                error TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
+        table = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'documents'"
+        ).fetchone()
+        if table is None:
+            _create_documents_table(connection)
+        else:
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+            }
+            schema = table["sql"] or ""
+            if not {"uploaded_at", "index_started_at", "indexed_at"}.issubset(columns) \
+                    or "'uploaded'" not in schema:
+                _migrate_documents_table(connection)
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_created_at "
             "ON documents(created_at DESC)"
         )
+
+
+def _create_documents_table(connection: sqlite3.Connection) -> None:
+    """Create the current document registry schema."""
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS documents (
+            id TEXT PRIMARY KEY,
+            filename TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            content_type TEXT,
+            size_bytes INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (
+                status IN ('uploaded', 'indexing', 'indexed', 'failed')
+            ),
+            parser TEXT,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            image_description_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            uploaded_at TEXT NOT NULL,
+            index_started_at TEXT,
+            indexed_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _migrate_documents_table(connection: sqlite3.Connection) -> None:
+    """Migrate rows from the original upload-and-index schema."""
+    old_rows = connection.execute("SELECT * FROM documents").fetchall()
+    connection.execute("DROP INDEX IF EXISTS idx_documents_created_at")
+    connection.execute("ALTER TABLE documents RENAME TO documents_legacy")
+    _create_documents_table(connection)
+    for row in old_rows:
+        old = dict(row)
+        old_status = old.get("status", "uploaded")
+        status = "uploaded" if old_status in {"uploading", "indexing"} else old_status
+        created_at = old.get("created_at") or _utc_now()
+        updated_at = old.get("updated_at") or created_at
+        connection.execute(
+            """
+            INSERT INTO documents (
+                id, filename, stored_path, content_type, size_bytes, sha256,
+                status, parser, chunk_count, image_description_count, error,
+                uploaded_at, index_started_at, indexed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                old["id"], old["filename"], old["stored_path"],
+                old.get("content_type"), old.get("size_bytes", 0),
+                old.get("sha256", ""), status, old.get("parser"),
+                old.get("chunk_count", 0), old.get("image_description_count", 0),
+                old.get("error"), created_at,
+                updated_at if old_status == "indexing" else None,
+                updated_at if old_status == "indexed" else None,
+                created_at, updated_at,
+            ),
+        )
+    connection.execute("DROP TABLE documents_legacy")
 
 
 def create_document(
@@ -83,16 +138,16 @@ def create_document(
     content_type: str | None,
     size_bytes: int,
     sha256: str,
-) -> None:
-    """Register a persisted upload before document parsing and indexing."""
+) -> str:
+    """Register a saved upload without starting indexing."""
     now = _utc_now()
     with _connection() as connection:
         connection.execute(
             """
             INSERT INTO documents (
                 id, filename, stored_path, content_type, size_bytes, sha256,
-                status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'uploading', ?, ?)
+                status, uploaded_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?, ?)
             """,
             (
                 document_id,
@@ -103,8 +158,10 @@ def create_document(
                 sha256,
                 now,
                 now,
+                now,
             ),
         )
+    return now
 
 
 def update_document(
@@ -112,17 +169,23 @@ def update_document(
     *,
     status: str,
     parser: str | None = None,
-    chunk_count: int = 0,
-    image_description_count: int = 0,
+    chunk_count: int | None = None,
+    image_description_count: int | None = None,
     error: str | None = None,
 ) -> None:
     """Update upload processing status and its indexing results."""
+    now = _utc_now()
     with _connection() as connection:
         cursor = connection.execute(
             """
             UPDATE documents
-            SET status = ?, parser = ?, chunk_count = ?,
-                image_description_count = ?, error = ?, updated_at = ?
+            SET status = ?, parser = COALESCE(?, parser),
+                chunk_count = COALESCE(?, chunk_count),
+                image_description_count = COALESCE(?, image_description_count),
+                error = ?,
+                index_started_at = CASE WHEN ? = 'indexing' THEN ? ELSE index_started_at END,
+                indexed_at = CASE WHEN ? = 'indexed' THEN ? ELSE indexed_at END,
+                updated_at = ?
             WHERE id = ?
             """,
             (
@@ -131,7 +194,11 @@ def update_document(
                 chunk_count,
                 image_description_count,
                 error,
-                _utc_now(),
+                status,
+                now,
+                status,
+                now,
+                now,
                 document_id,
             ),
         )
@@ -139,7 +206,46 @@ def update_document(
             raise LookupError(f"Document {document_id} was not found in the database.")
 
 
-def get_document_overview(limit: int = 100) -> dict[str, object]:
+def claim_documents_to_index() -> list[dict[str, object]]:
+    """Atomically mark uploaded or failed records for indexing."""
+    with _connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        rows = connection.execute(
+            """
+            SELECT id, filename, stored_path
+            FROM documents
+            WHERE status IN ('uploaded', 'failed')
+            ORDER BY uploaded_at ASC
+            """
+        ).fetchall()
+        now = _utc_now()
+        connection.executemany(
+            """
+            UPDATE documents
+            SET status = 'indexing', index_started_at = ?, indexed_at = NULL,
+                parser = NULL, chunk_count = 0, image_description_count = 0,
+                error = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            [(now, now, row["id"]) for row in rows],
+        )
+    return [dict(row) for row in rows]
+
+
+def recover_interrupted_indexing() -> None:
+    """Return records left indexing by a stopped server to the retry queue."""
+    with _connection() as connection:
+        connection.execute(
+            """
+            UPDATE documents
+            SET status = 'uploaded', index_started_at = NULL, updated_at = ?
+            WHERE status = 'indexing'
+            """,
+            (_utc_now(),),
+        )
+
+
+def get_document_overview(limit: int = 100, offset: int = 0) -> dict[str, object]:
     """Return total counts and recent document records without file paths."""
     with _connection() as connection:
         total_documents = connection.execute(
@@ -152,17 +258,16 @@ def get_document_overview(limit: int = 100) -> dict[str, object]:
             """
             SELECT id, filename, content_type, size_bytes, sha256, status,
                    parser, chunk_count, image_description_count, error,
-                   created_at, updated_at
+                   uploaded_at, index_started_at, indexed_at, created_at, updated_at
             FROM documents
             ORDER BY created_at DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (max(1, min(limit, 500)),),
+            (max(1, min(limit, 500)), max(0, offset)),
         ).fetchall()
-    status_counts = {
-        status: 0
-        for status in ("uploading", "indexing", "indexed", "failed")
-    }
+    status_counts = dict.fromkeys(
+        ("uploaded", "indexing", "indexed", "failed"), 0
+    )
     status_counts.update({row["status"]: row["count"] for row in status_rows})
     indexed_documents = status_counts["indexed"]
     documents = [dict(row) for row in rows]
@@ -172,6 +277,7 @@ def get_document_overview(limit: int = 100) -> dict[str, object]:
         "total_documents": total_documents,
         "indexed_documents": indexed_documents,
         "not_indexed_documents": total_documents - indexed_documents,
+        "pending_documents": status_counts["uploaded"] + status_counts["failed"],
         "status_counts": status_counts,
         "documents": documents,
     }

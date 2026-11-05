@@ -1,1 +1,57 @@
-{"$schema":"./node_modules/@angular/cli/lib/config/schema.json","version":1,"newProjectRoot":"projects","projects":{"rag-agent-ui":{"projectType":"application","root":"","sourceRoot":"src","architect":{"build":{"builder":"@angular-devkit/build-angular:application","options":{"outputPath":"dist/rag-agent-ui","index":"src/index.html","browser":"src/main.ts","polyfills":["zone.js"],"tsConfig":"tsconfig.app.json","styles":["src/styles.css"]},"configurations":{"production":{"optimization":true,"outputHashing":"all"},"development":{"optimization":false,"sourceMap":true}},"defaultConfiguration":"development"},"serve":{"builder":"@angular-devkit/build-angular:dev-server","configurations":{"production":{"buildTarget":"rag-agent-ui:build:production"},"development":{"buildTarget":"rag-agent-ui:build:development"},"defaultConfiguration":"development"}}}}}
+{
+  "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
+  "version": 1,
+  "newProjectRoot": "projects",
+  "projects": {
+    "rag-agent-ui": {
+      "projectType": "application",
+      "root": "",
+      "sourceRoot": "src",
+      "architect": {
+        "build": {
+          "builder": "@angular-devkit/build-angular:application",
+          "options": {
+            "outputPath": "dist/rag-agent-ui",
+            "index": "src/index.html",
+            "browser": "src/main.ts",
+            "polyfills": [
+              "zone.js"
+            ],
+            "tsConfig": "tsconfig.app.json",
+            "styles": [
+              "src/styles.css"
+            ]
+          },
+          "configurations": {
+            "production": {
+              "optimization": true,
+              "outputHashing": "all"
+            },
+            "development": {
+              "optimization": false,
+              "sourceMap": true
+            }
+          },
+          "defaultConfiguration": "development"
+        },
+        "serve": {
+          "builder": "@angular-devkit/build-angular:dev-server",
+          "options": {
+            "buildTarget": "rag-agent-ui:build:development"
+          },
+          "configurations": {
+            "production": {
+              "buildTarget": "rag-agent-ui:build:production"
+            },
+            "development": {
+              "buildTarget": "rag-agent-ui:build:development"
+            },
+            "defaultConfiguration": "development"
+          }
+        }
+      }
+    }
+  },
+  "cli": {
+    "analytics": "58d4bf0e-0ddc-48ed-b550-a9f18e6c1d58"
+  }
